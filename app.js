@@ -6,7 +6,7 @@ const path = require("path");
 const { Parser } = require("json2csv");
 const cloudinary = require("cloudinary").v2;
 
-// ================= HARDCODED KEYS =================
+// ================= YOUR KEYS =================
 const TELEGRAM_TOKEN = "8742242991:AAHDft6ZY7H7lMOuzFB7-zpMsr_nKYK2SHo";
 const API_KEY = "4827f87b-0e70-45ac-b822-92e7b4d6a291";
 
@@ -48,7 +48,7 @@ bot.onText(/\/start/, (msg) => {
 });
 
 bot.on("message", (msg) => {
-  if (msg.text === "📊 Stats") {
+  if (msg.text === "📊 Status") {
     bot.sendMessage(
       msg.chat.id,
       `📊 Stats:\n\nTotal: ${stats.total}\nProcessed: ${stats.processed}\n✅ Success: ${stats.success}\n♻ Duplicate: ${stats.duplicate}\n❌ Failed: ${stats.failed}`
@@ -56,7 +56,7 @@ bot.on("message", (msg) => {
   }
 });
 
-// ================= RETRY =================
+// ================= CREATE LEAD =================
 async function createLead(data) {
   let attempt = 0;
 
@@ -91,12 +91,34 @@ async function createLead(data) {
         },
       });
 
-      return res.data.message || "Success";
+      return {
+        message: res.data.message || "Success",
+        leadId: res.data.leadId || "",
+      };
+
     } catch (err) {
       attempt++;
-      if (attempt >= RETRY_COUNT) {
-        return err.response?.data?.message || "Failed";
+
+      let errorMsg = "Server Error";
+
+      if (err.response) {
+        const status = err.response.status;
+
+        if (status === 500) errorMsg = "Server Error";
+        else if (status === 422) errorMsg = "Not eligible";
+        else if (status === 400) errorMsg = err.response.data?.message || "Bad request";
+        else errorMsg = err.response.data?.message || `Error ${status}`;
+      } else if (err.request) {
+        errorMsg = "No response";
       }
+
+      if (attempt >= RETRY_COUNT) {
+        return {
+          message: errorMsg,
+          leadId: "",
+        };
+      }
+
       await new Promise((r) => setTimeout(r, 1000));
     }
   }
@@ -111,24 +133,27 @@ async function processBatches(rows, chatId) {
 
     const results = await Promise.all(
       batch.map(async (row) => {
-        const res = await createLead(row);
+        const result = await createLead(row);
+
+        const msg = result.message.toLowerCase();
+
+        if (msg.includes("success")) stats.success++;
+        else if (msg.includes("already")) stats.duplicate++;
+        else stats.failed++;
 
         stats.processed++;
 
-        if (res.toLowerCase().includes("success")) stats.success++;
-        else if (res.toLowerCase().includes("already")) stats.duplicate++;
-        else stats.failed++;
-
         return {
           mobileNumber: row.mobileNumber,
-          response: res,
+          response: result.message,
+          leadId: result.leadId,
         };
       })
     );
 
     output.push(...results);
 
-    // progress update
+    // 🔥 Live progress
     bot.sendMessage(
       chatId,
       `⏳ Progress: ${stats.processed}/${stats.total}`
@@ -154,6 +179,7 @@ bot.on("document", async (msg) => {
     const inputPath = path.join(__dirname, `input_${Date.now()}.csv`);
     const outputPath = path.join(__dirname, `output_${Date.now()}.csv`);
 
+    // download file
     const writer = fs.createWriteStream(inputPath);
     const response = await axios({
       url: fileLink,
