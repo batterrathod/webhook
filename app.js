@@ -7,11 +7,11 @@ const { Parser } = require("json2csv");
 const cloudinary = require("cloudinary").v2;
 const pLimit = require("p-limit");
 
-// ================= CONFIG =================
+// ================= HARD CODE =================
 const TELEGRAM_TOKEN = "8742242991:AAHDft6ZY7H7lMOuzFB7-zpMsr_nKYK2SHo";
 const API_KEY = "4827f87b-0e70-45ac-b822-92e7b4d6a291";
 
-const CONCURRENCY = 5; // parallel requests
+const CONCURRENCY = 5;
 const RETRY_COUNT = 3;
 
 cloudinary.config({
@@ -24,20 +24,43 @@ const API_URL = "https://l.creditlinks.in:8000/api/v2/partner/create-lead";
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
+// ================= GLOBAL STATS =================
+let globalStats = {
+  total: 0,
+  processed: 0,
+  success: 0,
+  failed: 0,
+  duplicate: 0,
+};
+
 console.log("🚀 Bot Started");
 
 // ================= UI =================
 
 bot.onText(/\/start/, (msg) => {
-  bot.sendMessage(msg.chat.id, "👋 Welcome!\nUpload CSV to create leads.", {
+  bot.sendMessage(msg.chat.id, "👋 Upload CSV", {
     reply_markup: {
-      keyboard: [[{ text: "📤 Upload CSV" }]],
+      keyboard: [
+        [{ text: "📤 Upload CSV" }],
+        [{ text: "📊 Stats" }]
+      ],
       resize_keyboard: true,
     },
   });
 });
 
-// ================= CORE FUNCTION =================
+// ================= STATS BUTTON =================
+
+bot.on("message", (msg) => {
+  if (msg.text === "📊 Stats") {
+    bot.sendMessage(
+      msg.chat.id,
+      `📊 Current Stats:\n\nTotal: ${globalStats.total}\nProcessed: ${globalStats.processed}\n✅ Success: ${globalStats.success}\n♻ Duplicate: ${globalStats.duplicate}\n❌ Failed: ${globalStats.failed}`
+    );
+  }
+});
+
+// ================= RETRY =================
 
 async function createLeadWithRetry(data) {
   let attempt = 0;
@@ -54,15 +77,14 @@ async function createLeadWithRetry(data) {
         pincode: data.pincode,
         monthlyIncome: parseInt(data.monthlyIncome),
 
-        consumerConsentDate: new Date()
-          .toISOString()
-          .slice(0, 19)
-          .replace("T", " "),
+        consumerConsentDate:
+          data.consumerConsentDate ||
+          new Date().toISOString().slice(0, 19).replace("T", " "),
         consumerConsentIp: "0.0.0.0",
 
         employmentStatus: 1,
-        employerName: "Company",
-        officePincode: data.pincode,
+        employerName: data.employerName || "Company",
+        officePincode: data.officePincode || data.pincode,
 
         waitForAllOffers: 1,
       };
@@ -77,22 +99,29 @@ async function createLeadWithRetry(data) {
       return res.data.message || "Success";
     } catch (err) {
       attempt++;
-
       if (attempt >= RETRY_COUNT) {
         return err.response?.data?.message || "Failed";
       }
-
-      await new Promise((r) => setTimeout(r, 1000)); // delay
+      await new Promise((r) => setTimeout(r, 1000));
     }
   }
 }
 
-// ================= FILE HANDLER =================
+// ================= MAIN =================
 
 bot.on("document", async (msg) => {
   const chatId = msg.chat.id;
 
-  bot.sendMessage(chatId, "📥 File received. Processing started...");
+  bot.sendMessage(chatId, "📥 Processing started...");
+
+  // RESET STATS
+  globalStats = {
+    total: 0,
+    processed: 0,
+    success: 0,
+    failed: 0,
+    duplicate: 0,
+  };
 
   try {
     const fileId = msg.document.file_id;
@@ -118,21 +147,28 @@ bot.on("document", async (msg) => {
         .pipe(csv())
         .on("data", (data) => rows.push(data))
         .on("end", async () => {
+          globalStats.total = rows.length;
+
           let output = [];
-
-          let success = 0;
-          let failed = 0;
-          let duplicate = 0;
-
           const limit = pLimit(CONCURRENCY);
 
-          const tasks = rows.map((row) =>
+          const tasks = rows.map((row, index) =>
             limit(async () => {
               const res = await createLeadWithRetry(row);
 
-              if (res.includes("successfully")) success++;
-              else if (res.includes("already")) duplicate++;
-              else failed++;
+              globalStats.processed++;
+
+              if (res.toLowerCase().includes("success")) globalStats.success++;
+              else if (res.toLowerCase().includes("already")) globalStats.duplicate++;
+              else globalStats.failed++;
+
+              // 🔥 LIVE PROGRESS UPDATE (every 5 leads)
+              if (globalStats.processed % 5 === 0) {
+                bot.sendMessage(
+                  chatId,
+                  `⏳ Progress: ${globalStats.processed}/${globalStats.total}`
+                );
+              }
 
               output.push({
                 mobileNumber: row.mobileNumber,
@@ -145,26 +181,23 @@ bot.on("document", async (msg) => {
 
           await Promise.all(tasks);
 
-          // CSV OUTPUT
           const parser = new Parser();
           const csvData = parser.parse(output);
 
           fs.writeFileSync(outputPath, csvData);
 
-          // Upload to Cloudinary
           const upload = await cloudinary.uploader.upload(outputPath, {
             resource_type: "raw",
           });
 
-          // SEND RESULT
           bot.sendMessage(
             chatId,
-            `✅ Processing Done!\n\n📊 Stats:\nTotal: ${rows.length}\nSuccess: ${success}\nDuplicate: ${duplicate}\nFailed: ${failed}\n\n📥 Download:\n${upload.secure_url}`
+            `✅ Completed!\n\n📊 Total: ${globalStats.total}\nProcessed: ${globalStats.processed}\n✅ Success: ${globalStats.success}\n♻ Duplicate: ${globalStats.duplicate}\n❌ Failed: ${globalStats.failed}\n\n📥 ${upload.secure_url}`
           );
         });
     });
   } catch (err) {
     console.error(err);
-    bot.sendMessage(chatId, "❌ Error processing file");
+    bot.sendMessage(chatId, "❌ Error");
   }
 });
