@@ -8,16 +8,16 @@ const cloudinary = require("cloudinary").v2;
 const pLimit = require("p-limit");
 
 // ================= CONFIG =================
-const TELEGRAM_TOKEN = "YOUR_TELEGRAM_TOKEN";
-const API_KEY = "YOUR_API_KEY";
+const TELEGRAM_TOKEN = "8742242991:AAHDft6ZY7H7lMOuzFB7-zpMsr_nKYK2SHo";
+const API_KEY = "4827f87b-0e70-45ac-b822-92e7b4d6a291";
 
 const CONCURRENCY = 5; // parallel requests
 const RETRY_COUNT = 3;
 
 cloudinary.config({
-  cloud_name: "YOUR_CLOUD_NAME",
-  api_key: "YOUR_API_KEY",
-  api_secret: "YOUR_API_SECRET",
+  cloud_name: "dvsndenmu",
+  api_key: "892768954865488",
+  api_secret: "7SVc0KOWK_68zTgrQg7aCnTOlGc",
 });
 
 const API_URL = "https://l.creditlinks.in:8000/api/v2/partner/create-lead";
