@@ -10,9 +10,6 @@ const cloudinary = require("cloudinary").v2;
 const TELEGRAM_TOKEN = "8742242991:AAHDft6ZY7H7lMOuzFB7-zpMsr_nKYK2SHo";
 const API_KEY = "4827f87b-0e70-45ac-b822-92e7b4d6a291";
 
-const CONCURRENCY = 2; // 🔥 safer for API
-const RETRY_COUNT = 3;
-
 cloudinary.config({
   cloud_name: "dvsndenmu",
   api_key: "892768954865488",
@@ -20,6 +17,8 @@ cloudinary.config({
 });
 
 const API_URL = "https://l.creditlinks.in:8000/api/v2/partner/create-lead";
+
+const RETRY_COUNT = 3;
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
@@ -33,6 +32,145 @@ let stats = {
 };
 
 console.log("🚀 Bot Started");
+
+// ================= DATE FORMAT =================
+function getFormattedDate() {
+  const d = new Date();
+  return d.getFullYear() + "-" +
+    String(d.getMonth() + 1).padStart(2, "0") + "-" +
+    String(d.getDate()).padStart(2, "0") + " " +
+    String(d.getHours()).padStart(2, "0") + ":" +
+    String(d.getMinutes()).padStart(2, "0") + ":" +
+    String(d.getSeconds()).padStart(2, "0");
+}
+
+// ================= CSV → PAYLOAD =================
+function convertRowToPayload(row) {
+  return {
+    mobileNumber: String(row.mobileNumber),
+    firstName: String(row.firstName),
+    lastName: String(row.lastName),
+    pan: String(row.pan),
+    dob: String(row.dob),
+    email: String(row.email),
+    pincode: String(row.pincode),
+    monthlyIncome: Number(row.monthlyIncome),
+
+    consumerConsentDate: getFormattedDate(),
+
+    // 🔥 REAL IP
+    consumerConsentIp: "103.21.58.192",
+
+    employmentStatus: 1,
+    employerName: row.employerName || "Private Ltd",
+    officePincode: row.officePincode || row.pincode,
+
+    waitForAllOffers: 1,
+  };
+}
+
+// ================= VALIDATION =================
+function validateRow(row) {
+  if (!row.mobileNumber || row.mobileNumber.length !== 10) return "Invalid Mobile";
+  if (!row.firstName) return "Missing First Name";
+  if (!row.lastName) return "Missing Last Name";
+  if (!row.pan) return "Missing PAN";
+  if (!row.dob) return "Missing DOB";
+  if (!row.email) return "Missing Email";
+  if (!row.pincode) return "Missing Pincode";
+  if (!row.monthlyIncome) return "Missing Income";
+  return null;
+}
+
+// ================= CREATE LEAD =================
+async function createLead(row) {
+  let attempt = 0;
+
+  while (attempt < RETRY_COUNT) {
+    let payload;
+
+    try {
+      payload = convertRowToPayload(row);
+
+      console.log("📤 Payload:", payload);
+
+      const res = await axios.post(API_URL, payload, {
+        headers: {
+          apikey: API_KEY,
+          "Content-Type": "application/json",
+        },
+      });
+
+      return {
+        message: res.data.message || "Success",
+        leadId: res.data.leadId || "",
+      };
+
+    } catch (err) {
+      attempt++;
+
+      console.log("❌ ERROR STATUS:", err.response?.status);
+      console.log("❌ ERROR DATA:", err.response?.data);
+
+      let errorMsg = "Server Error";
+
+      if (err.response) {
+        if (err.response.status === 422) errorMsg = "Not eligible";
+        else if (err.response.status === 400) errorMsg = err.response.data?.message || "Bad request";
+      }
+
+      if (attempt >= RETRY_COUNT) {
+        return { message: errorMsg, leadId: "" };
+      }
+
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+}
+
+// ================= PROCESS =================
+async function processRows(rows, chatId) {
+  let output = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+
+    const validationError = validateRow(row);
+
+    if (validationError) {
+      stats.failed++;
+      stats.processed++;
+
+      output.push({
+        mobileNumber: row.mobileNumber,
+        response: validationError,
+        leadId: "",
+      });
+
+      continue;
+    }
+
+    const result = await createLead(row);
+
+    const msg = result.message.toLowerCase();
+
+    if (msg.includes("success")) stats.success++;
+    else if (msg.includes("already")) stats.duplicate++;
+    else stats.failed++;
+
+    stats.processed++;
+
+    output.push({
+      mobileNumber: row.mobileNumber,
+      response: result.message,
+      leadId: result.leadId,
+    });
+
+    bot.sendMessage(chatId, `⏳ ${stats.processed}/${stats.total}`);
+  }
+
+  return output;
+}
 
 // ================= UI =================
 bot.onText(/\/start/, (msg) => {
@@ -56,149 +194,6 @@ bot.on("message", (msg) => {
   }
 });
 
-// ================= VALIDATION =================
-function validateRow(row) {
-  if (!row.mobileNumber || row.mobileNumber.length !== 10) return "Invalid Mobile";
-  if (!row.firstName) return "Missing First Name";
-  if (!row.lastName) return "Missing Last Name";
-  if (!row.pan) return "Missing PAN";
-  if (!row.dob) return "Missing DOB";
-  if (!row.email) return "Missing Email";
-  if (!row.pincode) return "Missing Pincode";
-  if (!row.monthlyIncome) return "Missing Income";
-  return null;
-}
-
-// ================= CREATE LEAD =================
-async function createLead(data) {
-  let attempt = 0;
-
-  while (attempt < RETRY_COUNT) {
-    try {
-      const payload = {
-        mobileNumber: data.mobileNumber,
-        firstName: data.firstName,
-        lastName: data.lastName,
-        pan: data.pan,
-        dob: data.dob,
-        email: data.email,
-        pincode: data.pincode,
-        monthlyIncome: parseInt(data.monthlyIncome) || 0,
-
-        consumerConsentDate:
-          data.consumerConsentDate ||
-          new Date().toISOString().slice(0, 19).replace("T", " "),
-        consumerConsentIp: "0.0.0.0",
-
-        employmentStatus: parseInt(data.employmentStatus) || 1,
-        waitForAllOffers: 1,
-      };
-
-      // 🔥 SALARIED FIX
-      if (payload.employmentStatus === 1) {
-        payload.employerName = data.employerName || "Default Company";
-        payload.officePincode = data.officePincode || data.pincode;
-      }
-
-      // 🔥 SELF EMPLOYED FIX
-      if (payload.employmentStatus === 2) {
-        payload.businessRegistrationType = parseInt(data.businessRegistrationType) || 8;
-
-        if (payload.businessRegistrationType !== 8) {
-          payload.residenceType = 1;
-          payload.businessCurrentTurnover = 1;
-          payload.businessYears = 1;
-          payload.businessAccount = 1;
-        }
-      }
-
-      const res = await axios.post(API_URL, payload, {
-        headers: {
-          apikey: API_KEY,
-          "Content-Type": "application/json",
-        },
-      });
-
-      return {
-        message: res.data.message || "Success",
-        leadId: res.data.leadId || "",
-      };
-
-    } catch (err) {
-      attempt++;
-
-      console.log("API ERROR:", err.response?.data);
-
-      let errorMsg = "Server Error";
-
-      if (err.response) {
-        const status = err.response.status;
-
-        if (status === 500) errorMsg = "Server Error";
-        else if (status === 422) errorMsg = "Not eligible";
-        else if (status === 400) errorMsg = err.response.data?.message || "Bad request";
-      }
-
-      if (attempt >= RETRY_COUNT) {
-        return {
-          message: errorMsg,
-          leadId: "",
-        };
-      }
-
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-  }
-}
-
-// ================= BATCH PROCESS =================
-async function processBatches(rows, chatId) {
-  let output = [];
-
-  for (let i = 0; i < rows.length; i += CONCURRENCY) {
-    const batch = rows.slice(i, i + CONCURRENCY);
-
-    const results = await Promise.all(
-      batch.map(async (row) => {
-        const validationError = validateRow(row);
-
-        if (validationError) {
-          stats.failed++;
-          stats.processed++;
-
-          return {
-            mobileNumber: row.mobileNumber,
-            response: validationError,
-            leadId: "",
-          };
-        }
-
-        const result = await createLead(row);
-
-        const msg = result.message.toLowerCase();
-
-        if (msg.includes("success")) stats.success++;
-        else if (msg.includes("already")) stats.duplicate++;
-        else stats.failed++;
-
-        stats.processed++;
-
-        return {
-          mobileNumber: row.mobileNumber,
-          response: result.message,
-          leadId: result.leadId,
-        };
-      })
-    );
-
-    output.push(...results);
-
-    bot.sendMessage(chatId, `⏳ Progress: ${stats.processed}/${stats.total}`);
-  }
-
-  return output;
-}
-
 // ================= MAIN =================
 bot.on("document", async (msg) => {
   const chatId = msg.chat.id;
@@ -208,11 +203,10 @@ bot.on("document", async (msg) => {
   stats = { total: 0, processed: 0, success: 0, failed: 0, duplicate: 0 };
 
   try {
-    const fileId = msg.document.file_id;
-    const fileLink = await bot.getFileLink(fileId);
+    const fileLink = await bot.getFileLink(msg.document.file_id);
 
-    const inputPath = path.join(__dirname, `input_${Date.now()}.csv`);
-    const outputPath = path.join(__dirname, `output_${Date.now()}.csv`);
+    const inputPath = path.join(__dirname, "input.csv");
+    const outputPath = path.join(__dirname, "output.csv");
 
     const writer = fs.createWriteStream(inputPath);
     const response = await axios({
@@ -232,7 +226,7 @@ bot.on("document", async (msg) => {
         .on("end", async () => {
           stats.total = rows.length;
 
-          const output = await processBatches(rows, chatId);
+          const output = await processRows(rows, chatId);
 
           const parser = new Parser();
           const csvData = parser.parse(output);
@@ -249,8 +243,9 @@ bot.on("document", async (msg) => {
           );
         });
     });
+
   } catch (err) {
     console.error(err);
-    bot.sendMessage(chatId, "❌ Error processing file");
+    bot.sendMessage(chatId, "❌ Error");
   }
 });
