@@ -40,7 +40,7 @@ bot.onText(/\/start/, (msg) => {
     reply_markup: {
       keyboard: [
         [{ text: "📤 Upload CSV" }],
-        [{ text: "📊 Stats" }]
+        [{ text: "📊 Status" }]
       ],
       resize_keyboard: true,
     },
