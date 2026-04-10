@@ -10,9 +10,9 @@ const { Readable } = require("stream");
 const TELEGRAM_TOKEN = "8742242991:AAEk8TO6sOgA1uinP9ZXdYp-g5yXDkDLsBI";
 const API_KEY = "4827f87b-0e70-45ac-b822-92e7b4d6a291";
 
-const CLOUD_NAME = "YOUR_CLOUD_NAME";
-const CLOUD_API_KEY = "YOUR_CLOUD_API_KEY";
-const CLOUD_API_SECRET = "YOUR_CLOUD_API_SECRET";
+const CLOUD_NAME = "dvsndenmu";
+const CLOUD_API_KEY = "892768954865488";
+const CLOUD_API_SECRET = "7SVc0KOWK_68zTgrQg7aCnTOlGc";
 
 // CLOUDINARY CONFIG
 cloudinary.config({
