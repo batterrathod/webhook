@@ -7,7 +7,7 @@ const streamifier = require("streamifier");
 const { Readable } = require("stream");
 
 // 🔐 PUT YOUR KEYS HERE
-const TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN";
+const TELEGRAM_TOKEN = "8742242991:AAEk8TO6sOgA1uinP9ZXdYp-g5yXDkDLsBI";
 const API_KEY = "YOUR_CREDITLINKS_API_KEY";
 
 const CLOUD_NAME = "YOUR_CLOUD_NAME";
