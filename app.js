@@ -10,7 +10,7 @@ const cloudinary = require("cloudinary").v2;
 const TELEGRAM_TOKEN = "8742242991:AAHDft6ZY7H7lMOuzFB7-zpMsr_nKYK2SHo";
 const API_KEY = "4827f87b-0e70-45ac-b822-92e7b4d6a291";
 
-const CONCURRENCY = 5;
+const CONCURRENCY = 2; // 🔥 safer for API
 const RETRY_COUNT = 3;
 
 cloudinary.config({
@@ -23,7 +23,7 @@ const API_URL = "https://l.creditlinks.in:8000/api/v2/partner/create-lead";
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
-// ================= GLOBAL STATS =================
+// ================= STATS =================
 let stats = {
   total: 0,
   processed: 0,
@@ -40,7 +40,7 @@ bot.onText(/\/start/, (msg) => {
     reply_markup: {
       keyboard: [
         [{ text: "📤 Upload CSV" }],
-        [{ text: "📊 Status" }]
+        [{ text: "📊 Stats" }]
       ],
       resize_keyboard: true,
     },
@@ -48,13 +48,26 @@ bot.onText(/\/start/, (msg) => {
 });
 
 bot.on("message", (msg) => {
-  if (msg.text === "📊 Status") {
+  if (msg.text === "📊 Stats") {
     bot.sendMessage(
       msg.chat.id,
       `📊 Stats:\n\nTotal: ${stats.total}\nProcessed: ${stats.processed}\n✅ Success: ${stats.success}\n♻ Duplicate: ${stats.duplicate}\n❌ Failed: ${stats.failed}`
     );
   }
 });
+
+// ================= VALIDATION =================
+function validateRow(row) {
+  if (!row.mobileNumber || row.mobileNumber.length !== 10) return "Invalid Mobile";
+  if (!row.firstName) return "Missing First Name";
+  if (!row.lastName) return "Missing Last Name";
+  if (!row.pan) return "Missing PAN";
+  if (!row.dob) return "Missing DOB";
+  if (!row.email) return "Missing Email";
+  if (!row.pincode) return "Missing Pincode";
+  if (!row.monthlyIncome) return "Missing Income";
+  return null;
+}
 
 // ================= CREATE LEAD =================
 async function createLead(data) {
@@ -70,19 +83,34 @@ async function createLead(data) {
         dob: data.dob,
         email: data.email,
         pincode: data.pincode,
-        monthlyIncome: parseInt(data.monthlyIncome),
+        monthlyIncome: parseInt(data.monthlyIncome) || 0,
 
         consumerConsentDate:
           data.consumerConsentDate ||
           new Date().toISOString().slice(0, 19).replace("T", " "),
         consumerConsentIp: "0.0.0.0",
 
-        employmentStatus: 1,
-        employerName: data.employerName || "Company",
-        officePincode: data.officePincode || data.pincode,
-
+        employmentStatus: parseInt(data.employmentStatus) || 1,
         waitForAllOffers: 1,
       };
+
+      // 🔥 SALARIED FIX
+      if (payload.employmentStatus === 1) {
+        payload.employerName = data.employerName || "Default Company";
+        payload.officePincode = data.officePincode || data.pincode;
+      }
+
+      // 🔥 SELF EMPLOYED FIX
+      if (payload.employmentStatus === 2) {
+        payload.businessRegistrationType = parseInt(data.businessRegistrationType) || 8;
+
+        if (payload.businessRegistrationType !== 8) {
+          payload.residenceType = 1;
+          payload.businessCurrentTurnover = 1;
+          payload.businessYears = 1;
+          payload.businessAccount = 1;
+        }
+      }
 
       const res = await axios.post(API_URL, payload, {
         headers: {
@@ -99,6 +127,8 @@ async function createLead(data) {
     } catch (err) {
       attempt++;
 
+      console.log("API ERROR:", err.response?.data);
+
       let errorMsg = "Server Error";
 
       if (err.response) {
@@ -107,9 +137,6 @@ async function createLead(data) {
         if (status === 500) errorMsg = "Server Error";
         else if (status === 422) errorMsg = "Not eligible";
         else if (status === 400) errorMsg = err.response.data?.message || "Bad request";
-        else errorMsg = err.response.data?.message || `Error ${status}`;
-      } else if (err.request) {
-        errorMsg = "No response";
       }
 
       if (attempt >= RETRY_COUNT) {
@@ -133,6 +160,19 @@ async function processBatches(rows, chatId) {
 
     const results = await Promise.all(
       batch.map(async (row) => {
+        const validationError = validateRow(row);
+
+        if (validationError) {
+          stats.failed++;
+          stats.processed++;
+
+          return {
+            mobileNumber: row.mobileNumber,
+            response: validationError,
+            leadId: "",
+          };
+        }
+
         const result = await createLead(row);
 
         const msg = result.message.toLowerCase();
@@ -153,11 +193,7 @@ async function processBatches(rows, chatId) {
 
     output.push(...results);
 
-    // 🔥 Live progress
-    bot.sendMessage(
-      chatId,
-      `⏳ Progress: ${stats.processed}/${stats.total}`
-    );
+    bot.sendMessage(chatId, `⏳ Progress: ${stats.processed}/${stats.total}`);
   }
 
   return output;
@@ -169,7 +205,6 @@ bot.on("document", async (msg) => {
 
   bot.sendMessage(chatId, "📥 Processing started...");
 
-  // reset stats
   stats = { total: 0, processed: 0, success: 0, failed: 0, duplicate: 0 };
 
   try {
@@ -179,7 +214,6 @@ bot.on("document", async (msg) => {
     const inputPath = path.join(__dirname, `input_${Date.now()}.csv`);
     const outputPath = path.join(__dirname, `output_${Date.now()}.csv`);
 
-    // download file
     const writer = fs.createWriteStream(inputPath);
     const response = await axios({
       url: fileLink,
