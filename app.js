@@ -1,214 +1,170 @@
 const TelegramBot = require("node-telegram-bot-api");
 const axios = require("axios");
 const csv = require("csv-parser");
+const fs = require("fs");
+const path = require("path");
 const { Parser } = require("json2csv");
 const cloudinary = require("cloudinary").v2;
-const streamifier = require("streamifier");
-const { Readable } = require("stream");
+const pLimit = require("p-limit");
 
+// ================= CONFIG =================
+const TELEGRAM_TOKEN = "YOUR_TELEGRAM_TOKEN";
+const API_KEY = "YOUR_API_KEY";
 
-// 🔐PUT YOUR KEYS HERE
-const TELEGRAM_TOKEN = "8742242991:AAHDft6ZY7H7lMOuzFB7-zpMsr_nKYK2SHo";
-const API_KEY = "4827f87b-0e70-45ac-b822-92e7b4d6a291";
+const CONCURRENCY = 5; // parallel requests
+const RETRY_COUNT = 3;
 
-const CLOUD_NAME = "dvsndenmu";
-const CLOUD_API_KEY = "892768954865488";
-const CLOUD_API_SECRET = "7SVc0KOWK_68zTgrQg7aCnTOlGc";
-P
-// ⚡ CONFIG
-const CONCURRENCY = 10;
-
-// GLOBAL ERROR HANDLING
-process.on("uncaughtException", console.error);
-process.on("unhandledRejection", console.error);
-
-// CLOUDINARY CONFIG
 cloudinary.config({
-  cloud_name: CLOUD_NAME,
-  api_key: CLOUD_API_KEY,
-  api_secret: CLOUD_API_SECRET
+  cloud_name: "YOUR_CLOUD_NAME",
+  api_key: "YOUR_API_KEY",
+  api_secret: "YOUR_API_SECRET",
 });
 
-// TELEGRAM BOT (FIX 409)
-const bot = new TelegramBot(TELEGRAM_TOKEN, {
-  polling: { autoStart: false }
+const API_URL = "https://l.creditlinks.in:8000/api/v2/partner/create-lead";
+
+const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+
+console.log("🚀 Bot Started");
+
+// ================= UI =================
+
+bot.onText(/\/start/, (msg) => {
+  bot.sendMessage(msg.chat.id, "👋 Welcome!\nUpload CSV to create leads.", {
+    reply_markup: {
+      keyboard: [[{ text: "📤 Upload CSV" }]],
+      resize_keyboard: true,
+    },
+  });
 });
 
-async function startBot() {
-  try {
-    await bot.deleteWebHook();
-    bot.startPolling({ restart: true });
-    console.log("✅ Bot started");
-  } catch (e) {
-    console.log("Retrying bot...");
-    setTimeout(startBot, 5000);
-  }
-}
-startBot();
+// ================= CORE FUNCTION =================
 
-// CREATE LEAD API
-async function createLead(row) {
-  try {
-    const res = await axios.post(
-      "https://l.creditlinks.in:8000/api/v2/partner/create-lead",
-      {
-        mobileNumber: row.mobileNumber,
-        firstName: row.firstName,
-        lastName: row.lastName,
-        pan: row.pan,
-        dob: row.dob,
-        email: row.email,
-        pincode: row.pincode,
-        monthlyIncome: parseInt(row.monthlyIncome),
-        employmentStatus: parseInt(row.employmentStatus),
-        employerName: row.employerName,
-        officePincode: row.officePincode,
+async function createLeadWithRetry(data) {
+  let attempt = 0;
+
+  while (attempt < RETRY_COUNT) {
+    try {
+      const payload = {
+        mobileNumber: data.mobileNumber,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        pan: data.pan,
+        dob: data.dob,
+        email: data.email,
+        pincode: data.pincode,
+        monthlyIncome: parseInt(data.monthlyIncome),
+
         consumerConsentDate: new Date()
           .toISOString()
           .slice(0, 19)
           .replace("T", " "),
-        consumerConsentIp: "127.0.0.1",
-        waitForAllOffers: 1
-      },
-      {
+        consumerConsentIp: "0.0.0.0",
+
+        employmentStatus: 1,
+        employerName: "Company",
+        officePincode: data.pincode,
+
+        waitForAllOffers: 1,
+      };
+
+      const res = await axios.post(API_URL, payload, {
         headers: {
           apikey: API_KEY,
-          "Content-Type": "application/json"
-        }
+          "Content-Type": "application/json",
+        },
+      });
+
+      return res.data.message || "Success";
+    } catch (err) {
+      attempt++;
+
+      if (attempt >= RETRY_COUNT) {
+        return err.response?.data?.message || "Failed";
       }
-    );
 
-    return {
-      mobileNumber: row.mobileNumber || "",
-      firstName: row.firstName || "",
-      lastName: row.lastName || "",
-      success: res.data?.success || false,
-      message: res.data?.message || "",
-      leadId: res.data?.leadId || ""
-    };
-
-  } catch (err) {
-    return {
-      mobileNumber: row.mobileNumber || "",
-      firstName: row.firstName || "",
-      lastName: row.lastName || "",
-      success: false,
-      message: err.response?.data?.message || err.message,
-      leadId: ""
-    };
+      await new Promise((r) => setTimeout(r, 1000)); // delay
+    }
   }
 }
 
-// ⚡ FAST BATCH PROCESSING
-async function processBatch(rows) {
-  let results = [];
+// ================= FILE HANDLER =================
 
-  for (let i = 0; i < rows.length; i += CONCURRENCY) {
-    const batch = rows.slice(i, i + CONCURRENCY);
-
-    const batchResults = await Promise.all(batch.map(createLead));
-    results.push(...batchResults);
-
-    console.log(`Processed ${Math.min(i + CONCURRENCY, rows.length)}/${rows.length}`);
-  }
-
-  return results;
-}
-
-// START COMMAND
-bot.onText(/\/start/, (msg) => {
-  bot.sendMessage(msg.chat.id, "📤 Upload your CSV file");
-});
-
-// FILE HANDLER
 bot.on("document", async (msg) => {
   const chatId = msg.chat.id;
 
+  bot.sendMessage(chatId, "📥 File received. Processing started...");
+
   try {
-    bot.sendMessage(chatId, "⚡ Processing started...");
+    const fileId = msg.document.file_id;
+    const fileLink = await bot.getFileLink(fileId);
 
-    // GET FILE
-    const file = await bot.getFile(msg.document.file_id);
-    const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${file.file_path}`;
+    const inputPath = path.join(__dirname, `input_${Date.now()}.csv`);
+    const outputPath = path.join(__dirname, `output_${Date.now()}.csv`);
 
-    // DOWNLOAD FILE
-    const response = await axios.get(fileUrl, {
-      responseType: "arraybuffer"
+    // Download file
+    const writer = fs.createWriteStream(inputPath);
+    const response = await axios({
+      url: fileLink,
+      method: "GET",
+      responseType: "stream",
     });
 
-    // PARSE CSV
-    const rows = [];
-    await new Promise((resolve, reject) => {
-      Readable.from(response.data)
+    response.data.pipe(writer);
+
+    writer.on("finish", async () => {
+      let rows = [];
+
+      fs.createReadStream(inputPath)
         .pipe(csv())
         .on("data", (data) => rows.push(data))
-        .on("end", resolve)
-        .on("error", reject);
-    });
+        .on("end", async () => {
+          let output = [];
 
-    await bot.sendMessage(chatId, `📊 Total Leads: ${rows.length}`);
+          let success = 0;
+          let failed = 0;
+          let duplicate = 0;
 
-    // PROCESS
-    const results = await processBatch(rows);
+          const limit = pLimit(CONCURRENCY);
 
-    // SAFE CSV GENERATE
-    let csvData;
-    try {
-      const parser = new Parser({ defaultValue: "" });
-      csvData = parser.parse(results);
-    } catch (e) {
-      console.log("CSV ERROR:", e);
-      return bot.sendMessage(chatId, "❌ CSV generation failed");
-    }
+          const tasks = rows.map((row) =>
+            limit(async () => {
+              const res = await createLeadWithRetry(row);
 
-    const buffer = Buffer.from(csvData, "utf-8");
+              if (res.includes("successfully")) success++;
+              else if (res.includes("already")) duplicate++;
+              else failed++;
 
-    // SAFE CLOUDINARY UPLOAD
-    let uploadResult;
-    try {
-      uploadResult = await new Promise((resolve, reject) => {
-        const uploadStream = cloudinary.uploader.upload_stream(
-          {
+              output.push({
+                mobileNumber: row.mobileNumber,
+                response: res,
+              });
+
+              console.log(row.mobileNumber, res);
+            })
+          );
+
+          await Promise.all(tasks);
+
+          // CSV OUTPUT
+          const parser = new Parser();
+          const csvData = parser.parse(output);
+
+          fs.writeFileSync(outputPath, csvData);
+
+          // Upload to Cloudinary
+          const upload = await cloudinary.uploader.upload(outputPath, {
             resource_type: "raw",
-            folder: "telegram-leads",
-            public_id: `output_${Date.now()}`
-          },
-          (err, res) => {
-            if (err) return reject(err);
-            resolve(res);
-          }
-        );
+          });
 
-        streamifier.createReadStream(buffer).pipe(uploadStream);
-      });
-    } catch (e) {
-      console.log("UPLOAD ERROR:", e);
-      return bot.sendMessage(chatId, "❌ Upload failed");
-    }
-
-    // SEND RESULT
-    try {
-      await bot.sendMessage(chatId, `✅ Done!\n📥 ${uploadResult.secure_url}`);
-
-      await bot.sendDocument(chatId, buffer, {
-        caption: "📄 Your CSV"
-      }, {
-        filename: "output.csv",
-        contentType: "text/csv"
-      });
-
-    } catch (e) {
-      console.log("TELEGRAM ERROR:", e);
-      bot.sendMessage(chatId, "❌ File send failed");
-    }
-
+          // SEND RESULT
+          bot.sendMessage(
+            chatId,
+            `✅ Processing Done!\n\n📊 Stats:\nTotal: ${rows.length}\nSuccess: ${success}\nDuplicate: ${duplicate}\nFailed: ${failed}\n\n📥 Download:\n${upload.secure_url}`
+          );
+        });
+    });
   } catch (err) {
     console.error(err);
     bot.sendMessage(chatId, "❌ Error processing file");
   }
 });
-
-// KEEP ALIVE (for GitHub / Render)
-setInterval(() => {
-  console.log("Running...");
-}, 30000);
