@@ -8,7 +8,7 @@ const { Readable } = require("stream");
 
 
 // 🔐PUT YOUR KEYS HERE
-const TELEGRAM_TOKEN = "8742242991:AAEk8TO6sOgA1uinP9ZXdYp-g5yXDkDLsBI";
+const TELEGRAM_TOKEN = "8742242991:AAHDft6ZY7H7lMOuzFB7-zpMsr_nKYK2SHo";
 const API_KEY = "4827f87b-0e70-45ac-b822-92e7b4d6a291";
 
 const CLOUD_NAME = "dvsndenmu";
